@@ -1,0 +1,21 @@
+# Environment variables and secrets
+.env
+
+# Google OAuth credentials and tokens
+credentials.json
+token.json
+
+# Local databases and logs
+bot_data.db
+*.db
+bot.log
+*.log
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# macOS
+.DS_Store
