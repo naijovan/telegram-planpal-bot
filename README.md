@@ -19,6 +19,8 @@ Important: the bot only works while the Python process is running. If you stop t
 - Important Tasks for daily priorities
 - Pinned Telegram task summary
 - Pending and Done task tracking
+- 5am daily itinerary reminder
+- 8pm tomorrow-review reminder
 - Dynamic Telegram keyboards
 - SQLite local storage for drafts, task status, and local bot data
 
@@ -169,7 +171,24 @@ The bot will only respond while this command is running. If the terminal is clos
 - `/edit_task` - Rename an important task
 - `/delete_task` - Delete an important task
 - `/refresh_tasks` - Refresh the Important Tasks summary and try to pin it when appropriate
+- `/cancel` - Cancel the current active flow
 - `/back` - Return to the main menu
+
+## Scheduled Reminders
+
+Telegram PlanPal Bot registers two daily reminder jobs when `python3 bot.py` starts:
+
+- 5:00 AM Asia/Singapore - sends today's Google Calendar itinerary and today's Important Tasks summary
+- 8:00 PM Asia/Singapore - asks `Have you reviewed tomorrow’s itinerary?`
+
+The 8pm review message includes buttons:
+
+- `View tomorrow` - shows tomorrow's Google Calendar events
+- `Add event` - starts the guided `/add` event flow
+- `Mark as No Plans` - saves tomorrow as `no_plans` in SQLite
+- `Done` - saves tomorrow as `reviewed` in SQLite
+
+The scheduled reminders are sent only to users/chats that have sent `/start`.
 
 ## Typical Usage Flow
 
@@ -187,6 +206,7 @@ Add an event:
 ```
 
 Then follow the buttons to choose the date, time, title, optional location, optional notes, recurrence, and confirmation.
+Most active flows include a visible `Cancel` or `/cancel` button so you can stop without typing commands manually.
 
 Edit or delete an event:
 
@@ -234,7 +254,7 @@ This bot is not hosted by default.
 
 For testing, running the bot locally is enough. For daily use, you should host your own copy on a service that supports long-running Python processes. A beginner-friendly option to consider is fps.ms Telegram Bot Hosting because it is designed specifically for Telegram bots. However, check the latest pricing and plan limits before choosing a provider. Other options include Railway, Render Background Worker, Fly.io, Oracle Cloud Free Tier, or running it on a Raspberry Pi/home server.
 
-The hosting provider must support long-running Python processes or background workers. If the host stops the process, the bot will stop responding.
+The hosting provider must support long-running Python processes or background workers. If the host stops the process, the bot will stop responding and the 5am/8pm reminders will not run.
 
 On any hosting provider, keep these files private:
 
@@ -253,12 +273,10 @@ Hosting plans and free tiers can change, so check current pricing yourself befor
 - Each user must create their own Telegram bot and Google credentials.
 - SQLite is best for personal or local use.
 - Multi-user public deployment would need per-user OAuth and a hosted database.
-- Scheduled 5am and 8pm reminders are not implemented yet.
+- Scheduled reminders only work while the bot process is running.
 
 ## Future Improvements
 
-- 5am daily itinerary reminders
-- 8pm tomorrow review reminder
 - Better recurrence editing
 - Optional natural-language quick-add
 - Public multi-user version with proper OAuth

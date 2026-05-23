@@ -59,6 +59,14 @@ def build_task_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def build_cancel_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([["/cancel"]], resize_keyboard=True)
+
+
+def build_skip_cancel_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([["/skip", "/cancel"]], resize_keyboard=True)
+
+
 def build_task_date_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -70,8 +78,24 @@ def build_task_date_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def build_tomorrow_review_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("View tomorrow", callback_data="review:view_tomorrow"),
+                InlineKeyboardButton("Add event", callback_data="review:add_event"),
+            ],
+            [
+                InlineKeyboardButton("Mark as No Plans", callback_data="review:no_plans"),
+                InlineKeyboardButton("Done", callback_data="review:done"),
+            ],
+        ]
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start and introduce the bot."""
+    database.save_bot_user(update.effective_user.id, update.effective_chat.id)
     message = (
         "Hello! I am your itinerary assistant bot.\n\n"
         "I can help you review and manage your Google Calendar itinerary.\n\n"
@@ -111,7 +135,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/refresh_tasks - Manual fallback to refresh the pinned important task summary\n"
         "/edit - Alias for /amend\n"
         "/delete - Alias for /amend\n"
-        "/cancel - Cancel the current event draft\n"
+        "/cancel - Cancel the current action\n"
         "/skip - Skip optional location or notes entry\n"
         "/back - Return to the main menu\n"
     )
@@ -233,6 +257,7 @@ def build_period_keyboard(
             keyboard.append([InlineKeyboardButton(label, callback_data=f"add:period:{period}")])
     if not keyboard:
         return None
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data="add:cancel:yes")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -246,6 +271,11 @@ def build_button_grid(strings: list[str], callback_prefix: str) -> list[list[Inl
             row = []
     if row:
         buttons.append(row)
+    return buttons
+
+
+def add_cancel_row(buttons: list[list[InlineKeyboardButton]], callback_data: str) -> list[list[InlineKeyboardButton]]:
+    buttons.append([InlineKeyboardButton("Cancel", callback_data=callback_data)])
     return buttons
 
 
@@ -920,7 +950,10 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if stage == "entered_location":
         data["location"] = ""
         database.save_draft(user_id, "entered_notes", data)
-        await update.message.reply_text("Location skipped. Enter notes (or send /skip to leave empty):")
+        await update.message.reply_text(
+            "Location skipped. Enter notes, or use /skip to leave empty.",
+            reply_markup=build_skip_cancel_keyboard(),
+        )
         return
 
     if stage == "entered_notes":
@@ -1042,7 +1075,7 @@ async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     database.save_draft(user_id, "awaiting_task_title", {"task_date": task_date})
     await update.message.reply_text(
         f"Type the important task for {task_date}.",
-        reply_markup=build_task_keyboard(),
+        reply_markup=build_cancel_keyboard(),
     )
 
 
@@ -1117,23 +1150,31 @@ async def refresh_tasks_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    draft = database.get_draft(user_id)
+    if not draft:
+        await update.message.reply_text("There is no active action to cancel.", reply_markup=build_main_keyboard())
+        return
     database.clear_draft(user_id)
-    await update.message.reply_text("Event creation cancelled. You can start again with /add.")
+    await update.message.reply_text("Action cancelled.", reply_markup=build_main_keyboard())
 
 
 async def add_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /add as a placeholder for the guided event flow."""
     user_id = update.effective_user.id
-    # start a draft and ask for date selection
+    await send_add_event_date_prompt(update.message, user_id)
+
+
+async def send_add_event_date_prompt(target, user_id: int) -> None:
+    """Start the guided add-event flow using any Telegram message target."""
     keyboard = [
         [InlineKeyboardButton("Today", callback_data="add:date:today")],
         [InlineKeyboardButton("Tomorrow", callback_data="add:date:tomorrow")],
         [InlineKeyboardButton("Other days", callback_data="add:date:pick")],
+        [InlineKeyboardButton("Cancel", callback_data="add:cancel:yes")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    # initialize draft
     database.save_draft(user_id, "date_selection", {})
-    await update.message.reply_text("Choose a date for the event:", reply_markup=reply_markup)
+    await target.reply_text("Choose a date for the event:", reply_markup=reply_markup)
 
 
 async def continue_add_date_selection(query, user_id: int, draft_data: dict, selected_day) -> None:
@@ -1395,7 +1436,7 @@ async def add_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "That time period has already passed. Please use /add again and choose another period."
             )
             return
-        buttons = build_button_grid(start_options, "add:start")
+        buttons = add_cancel_row(build_button_grid(start_options, "add:start"), "add:cancel:yes")
         await query.edit_message_text("Select start time:", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
@@ -1427,7 +1468,7 @@ async def add_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
-        buttons = build_button_grid(end_options, "add:end")
+        buttons = add_cancel_row(build_button_grid(end_options, "add:end"), "add:cancel:yes")
         await query.edit_message_text("Select end time:", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
@@ -1450,7 +1491,8 @@ async def add_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         database.save_draft(user_id, "entered_title", draft_data)
         await query.edit_message_text(
-            "Enter the event title as a text message:"
+            "Enter the event title as a text message:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="add:cancel:yes")]]),
         )
         return
 
@@ -1501,7 +1543,10 @@ async def add_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == "edit" and val == "title":
         database.save_draft(user_id, "entered_title", draft_data)
-        await query.edit_message_text("Enter the updated event title:")
+        await query.edit_message_text(
+            "Enter the updated event title:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="add:cancel:yes")]]),
+        )
         return
 
     await query.edit_message_text("Unknown action. Please use /add to start again.")
@@ -1637,7 +1682,10 @@ async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if stage == "awaiting_task_title":
         if not text:
-            await update.message.reply_text("Please type a task before I save it.")
+            await update.message.reply_text(
+                "Please type a task before I save it, or use /cancel.",
+                reply_markup=build_cancel_keyboard(),
+            )
             return
         task_date = data.get("task_date") or today_text()
         try:
@@ -1667,7 +1715,10 @@ async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if stage == "awaiting_task_edit_title":
         if not text:
-            await update.message.reply_text("Please type the updated task text.")
+            await update.message.reply_text(
+                "Please type the updated task text, or use /cancel.",
+                reply_markup=build_cancel_keyboard(),
+            )
             return
         task_id = data.get("task_id")
         task = database.get_important_task(user_id, task_id) if task_id else None
@@ -1740,13 +1791,19 @@ async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if stage == "entered_title":
         data["title"] = text
         database.save_draft(user_id, "entered_location", data)
-        await update.message.reply_text("Enter location (or send /skip to leave empty):")
+        await update.message.reply_text(
+            "Enter location, or use /skip to leave empty.",
+            reply_markup=build_skip_cancel_keyboard(),
+        )
         return
 
     if stage == "entered_location":
         data["location"] = text
         database.save_draft(user_id, "entered_notes", data)
-        await update.message.reply_text("Enter notes (or send /skip to leave empty):")
+        await update.message.reply_text(
+            "Enter notes, or use /skip to leave empty.",
+            reply_markup=build_skip_cancel_keyboard(),
+        )
         return
 
     if stage == "entered_notes":
@@ -1792,7 +1849,8 @@ async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if stage == "confirm_event":
         await update.message.reply_text(
-            "Please use the confirmation buttons to finish the event creation."
+            "Please use the confirmation buttons to finish the event creation, or use /cancel.",
+            reply_markup=build_cancel_keyboard(),
         )
         return
 
@@ -1826,7 +1884,10 @@ async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             elif field in {"start_time", "end_time"}:
                 updated_event[field] = parse_time_input(text)
                 if updated_event["end_time"] <= updated_event["start_time"]:
-                    await update.message.reply_text("Invalid time entered. End time must be after start time.")
+                    await update.message.reply_text(
+                        "Invalid time entered. End time must be after start time, or use /cancel.",
+                        reply_markup=build_cancel_keyboard(),
+                    )
                     return
                 changed_fields[field] = updated_event[field]
             else:
@@ -1839,9 +1900,15 @@ async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     reply_markup=build_context_calendar_keyboard(user_id, "editdate"),
                 )
             elif field in {"start_time", "end_time"}:
-                await update.message.reply_text("Invalid time format. Please send HH:MM.")
+                await update.message.reply_text(
+                    "Invalid time format. Please send HH:MM, or use /cancel.",
+                    reply_markup=build_cancel_keyboard(),
+                )
             else:
-                await update.message.reply_text("Invalid value. Please try again.")
+                await update.message.reply_text(
+                    "Invalid value. Please try again, or use /cancel.",
+                    reply_markup=build_cancel_keyboard(),
+                )
             return
 
         if field in {"date", "start_time", "end_time"}:
@@ -1913,25 +1980,72 @@ async def show_google_calendar_day(update: Update, target_day, day_label: str) -
     await send_google_calendar_day(update.message, target_day, day_label)
 
 
-async def send_google_calendar_day(target, target_day, day_label: str, reply_markup=None) -> None:
+def build_google_calendar_day_text(target_day, day_label: str) -> str:
     try:
         events = calendar_service.get_events_for_day(target_day)
-        message = calendar_service.format_events_for_telegram(events, day_label)
+        return calendar_service.format_events_for_telegram(events, day_label)
     except calendar_service.CalendarSetupError as exc:
-        message = (
+        return (
             "Google Calendar is not ready yet.\n\n"
             f"{exc}\n\n"
             "Local events are still available with /local_today and /local_tomorrow."
         )
     except calendar_service.CalendarApiError as exc:
         logger.warning("Google Calendar API error: %s", exc)
-        message = (
+        return (
             "I could not read Google Calendar right now. "
             "Please try again later, or use /local_today and /local_tomorrow for local events."
         )
 
+
+async def send_google_calendar_day(target, target_day, day_label: str, reply_markup=None) -> None:
+    message = build_google_calendar_day_text(target_day, day_label)
     await target.reply_text(message, reply_markup=reply_markup)
 
+
+def build_daily_itinerary_message(user_id: int, target_day) -> str:
+    date_text = target_day.isoformat()
+    calendar_text = build_google_calendar_day_text(target_day, "today")
+    task_summary = format_important_tasks_summary(
+        date_text,
+        database.list_important_tasks(user_id, date_text),
+    )
+    return (
+        f"Good morning! Here is your itinerary for {date_text}.\n\n"
+        f"{calendar_text}\n\n"
+        f"{task_summary}"
+    )
+
+
+async def send_5am_itinerary_to_chat(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=build_daily_itinerary_message(user_id, singapore_today()),
+    )
+
+
+async def send_8pm_review_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Have you reviewed tomorrow’s itinerary?",
+        reply_markup=build_tomorrow_review_keyboard(),
+    )
+
+
+async def send_5am_itineraries_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for bot_user in database.list_bot_users():
+        try:
+            await send_5am_itinerary_to_chat(context, bot_user["user_id"], bot_user["chat_id"])
+        except TelegramError as exc:
+            logger.info("Could not send 5am itinerary to chat %s: %s", bot_user["chat_id"], exc)
+
+
+async def send_8pm_reviews_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for bot_user in database.list_bot_users():
+        try:
+            await send_8pm_review_to_chat(context, bot_user["chat_id"])
+        except TelegramError as exc:
+            logger.info("Could not send 8pm review to chat %s: %s", bot_user["chat_id"], exc)
 
 async def local_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show locally stored events for today (Phase 2)."""
@@ -2372,7 +2486,10 @@ async def task_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if action == "edit":
         database.save_draft(user_id, "awaiting_task_edit_title", {"task_id": task_id, "task_date": task_date})
-        await query.edit_message_text(f"Type the updated task text:\n\n{task['title']}")
+        await query.edit_message_text(
+            f"Type the updated task text:\n\n{task['title']}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="task:cancel")]]),
+        )
         return
 
     if action == "delete":
@@ -2444,6 +2561,26 @@ async def event_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
 
+        database.save_draft(user_id, "pending_event_delete", selected)
+        await query.edit_message_text(
+            "Delete this event?\n\n" + format_event_summary(selected),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Confirm delete", callback_data=f"event:confirm_delete:{parts[2]}")],
+                    [InlineKeyboardButton("Cancel", callback_data="event:cancel")],
+                ]
+            ),
+        )
+        return
+
+    if action == "confirm_delete" and len(parts) >= 3:
+        selected = get_selected_calendar_event(user_id, parts[2])
+        if not selected:
+            draft = database.get_draft(user_id)
+            selected = draft.get("data", {}) if draft and draft.get("stage") == "pending_event_delete" else None
+        if not selected:
+            await query.edit_message_text("Event selection expired. Use /amend to start again.")
+            return
         await delete_selected_google_event(query, user_id, selected)
         return
 
@@ -2492,10 +2629,47 @@ async def event_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             prompt = f"Please send the new {field.replace('_', ' ')} in HH:MM format."
         else:
             prompt = f"Please send the new value for {field} as a text message."
-        await query.edit_message_text(prompt)
+        await query.edit_message_text(
+            prompt,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="event:cancel")]]),
+        )
         return
 
     await query.edit_message_text("Unknown event action. Use /amend to start again.")
+
+
+async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    review_date = tomorrow_text()
+    parts = query.data.split(":")
+    if len(parts) != 2:
+        await query.edit_message_text("Invalid review action.")
+        return
+
+    action = parts[1]
+    if action == "view_tomorrow":
+        await send_google_calendar_day(query.message, singapore_today() + timedelta(days=1), "tomorrow")
+        return
+
+    if action == "add_event":
+        await query.message.reply_text("Sure. Let’s add an event for your plans.")
+        await send_add_event_date_prompt(query.message, user_id)
+        return
+
+    if action == "no_plans":
+        database.save_daily_review(user_id, chat_id, review_date, "no_plans")
+        await query.edit_message_text(f"Saved. {review_date} is marked as no plans.")
+        return
+
+    if action == "done":
+        database.save_daily_review(user_id, chat_id, review_date, "reviewed")
+        await query.edit_message_text(f"Saved. {review_date} is marked as reviewed.")
+        return
+
+    await query.edit_message_text("Unknown review action.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2506,6 +2680,31 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             "Sorry, I ran into an error while processing your request. "
             "Please try again or contact the bot owner."
         )
+
+
+def register_scheduled_jobs(app) -> None:
+    """Register daily reminders once when the bot process starts."""
+    if not app.job_queue:
+        logger.warning(
+            "JobQueue is not available. Install python-telegram-bot with the job-queue extra."
+        )
+        return
+
+    for job_name in ("daily_5am_itinerary", "daily_8pm_review"):
+        for existing_job in app.job_queue.get_jobs_by_name(job_name):
+            existing_job.schedule_removal()
+
+    app.job_queue.run_daily(
+        send_5am_itineraries_job,
+        time=time(hour=5, minute=0, tzinfo=LOCAL_TZ),
+        name="daily_5am_itinerary",
+    )
+    app.job_queue.run_daily(
+        send_8pm_reviews_job,
+        time=time(hour=20, minute=0, tzinfo=LOCAL_TZ),
+        name="daily_8pm_review",
+    )
+    logger.info("Scheduled daily reminders for 05:00 and 20:00 Asia/Singapore.")
 
 
 def main() -> None:
@@ -2552,6 +2751,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(calendar_picker_callback_handler, pattern=r"^cal:"))
     app.add_handler(CallbackQueryHandler(task_date_callback_handler, pattern=r"^taskdate:"))
     app.add_handler(CallbackQueryHandler(task_callback_handler, pattern=r"^task:"))
+    app.add_handler(CallbackQueryHandler(review_callback_handler, pattern=r"^review:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_text_handler))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("tomorrow", tomorrow))
@@ -2567,6 +2767,7 @@ def main() -> None:
     app.add_handler(CommandHandler("edit", edit_command))
     app.add_handler(CallbackQueryHandler(event_callback_handler, pattern=r"^event:"))
 
+    register_scheduled_jobs(app)
     logger.info("Bot started with Google Calendar sync enabled. Waiting for commands...")
     app.run_polling()
 

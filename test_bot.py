@@ -207,6 +207,28 @@ def test_database_functions():
         assert len(old_pins) == 1 and old_pins[0]["pinned_message_id"] == 122, "Old task pin should be listed"
         print("   ✓ Task pin metadata is saved and updated")
 
+        # Test 9: Bot user storage
+        print("\n9. Testing bot user storage...")
+        database.save_bot_user(user_id, 999)
+        database.save_bot_user(user_id, 999)
+        bot_users = database.list_bot_users()
+        matching_users = [
+            bot_user for bot_user in bot_users
+            if bot_user["user_id"] == user_id and bot_user["chat_id"] == 999
+        ]
+        assert len(matching_users) == 1, "Bot user should be upserted once"
+        print("   ✓ Bot users can be saved for scheduled messages")
+
+        # Test 10: Daily review status
+        print("\n10. Testing daily review status...")
+        database.save_daily_review(user_id, 999, "2026-05-23", "reviewed")
+        review = database.get_daily_review(user_id, 999, "2026-05-23")
+        assert review["status"] == "reviewed", "Review should be saved"
+        database.save_daily_review(user_id, 999, "2026-05-23", "no_plans")
+        review = database.get_daily_review(user_id, 999, "2026-05-23")
+        assert review["status"] == "no_plans", "Review status should be updated"
+        print("   ✓ Daily review statuses can be saved and updated")
+
 
 # ============================================================================
 # UTILITY FUNCTION TESTS
@@ -272,6 +294,7 @@ def test_utility_functions():
     keyboard_labels = [button.text for row in filtered_keyboard.inline_keyboard for button in row]
     assert "Morning" not in keyboard_labels, "Passed periods should be hidden"
     assert "Afternoon" in keyboard_labels, "Current period should stay visible when it has future slots"
+    assert "Cancel" in keyboard_labels, "Active period selection should include Cancel"
 
     end_times_after_315 = get_day_end_time_options("15:15")
     assert "15:00" not in end_times_after_315, "End time cannot be before start"
@@ -417,18 +440,22 @@ async def test_command_handlers():
         update.callback_query.edit_message_text = AsyncMock()
         update.callback_query.message = AsyncMock()
         update.callback_query.message.chat_id = 777
+        update.callback_query.message.reply_text = AsyncMock()
         return update
     
     context = AsyncMock()
     
     # Test 1: start command
     print("\n1. Testing start command handler...")
-    update = create_mock_update()
-    await bot.start(update, context)
-    assert update.message.reply_text.called, "Should send reply"
-    call_args = update.message.reply_text.call_args
-    assert "Hello" in str(call_args), "Should contain welcome message"
-    assert "itinerary" in str(call_args).lower(), "Should mention itinerary"
+    with patch.object(database, 'DB_PATH', TEST_DB_PATH):
+        update = create_mock_update()
+        await bot.start(update, context)
+        assert update.message.reply_text.called, "Should send reply"
+        call_args = update.message.reply_text.call_args
+        assert "Hello" in str(call_args), "Should contain welcome message"
+        assert "itinerary" in str(call_args).lower(), "Should mention itinerary"
+        registered = database.list_bot_users()
+        assert any(user["chat_id"] == update.effective_chat.id for user in registered)
     print("   ✓ Start command sends welcome message with keyboard")
     
     # Test 2: help command
@@ -439,6 +466,7 @@ async def test_command_handlers():
     call_args = update.message.reply_text.call_args
     assert "/add" in str(call_args), "Should list /add command"
     assert "/today" in str(call_args), "Should list /today command"
+    assert "/test_5am" not in str(call_args) and "/test_8pm" not in str(call_args)
     print("   ✓ Help command lists all available commands")
     
     # Test 3: connect_calendar command
@@ -492,6 +520,7 @@ async def test_command_handlers():
     await bot.add_event(update, context)
     assert update.message.reply_text.called, "Should send reply with options"
     assert "Other days" in str(update.message.reply_text.call_args)
+    assert "Cancel" in str(update.message.reply_text.call_args)
     assert "Pick date" not in str(update.message.reply_text.call_args)
     print("   ✓ Add event command sends date selection options")
 
@@ -728,8 +757,90 @@ async def test_command_handlers():
         assert "/view" in labels and "/tasks" in labels
         print("   ✓ Back command returns to main keyboard")
 
-    # Test 12: custom date view text input
-    print("\n12. Testing custom date view text input...")
+    # Test 12: scheduled reminder send helpers
+    print("\n12. Testing scheduled reminder send helpers...")
+    with patch.object(database, 'DB_PATH', TEST_DB_PATH):
+        user_id = 13580
+        chat_id = 777
+        reminder_context = AsyncMock()
+        reminder_context.bot = AsyncMock()
+        with patch.object(bot, "build_google_calendar_day_text", return_value="No events found for today."):
+            await bot.send_5am_itinerary_to_chat(reminder_context, user_id, chat_id)
+        call_args = str(reminder_context.bot.send_message.call_args)
+        assert "Good morning" in call_args
+        assert "Important tasks for" in call_args
+
+        await bot.send_8pm_review_to_chat(reminder_context, chat_id)
+        call_args = reminder_context.bot.send_message.call_args
+        assert "Have you reviewed tomorrow’s itinerary?" in str(call_args)
+        assert "review:view_tomorrow" in str(call_args)
+        print("   ✓ Scheduled 5am and 8pm helpers send the expected reminder messages")
+
+    # Test 13: tomorrow review callbacks
+    print("\n13. Testing tomorrow review callbacks...")
+    with patch.object(database, 'DB_PATH', TEST_DB_PATH):
+        user_id = 13581
+        update = create_mock_callback(user_id=user_id, callback_data="review:view_tomorrow")
+        with patch.object(bot, "send_google_calendar_day", AsyncMock()) as send_day:
+            await bot.review_callback_handler(update, context)
+        send_day.assert_called_once()
+        assert send_day.call_args.args[1].isoformat() == bot.tomorrow_text()
+        assert send_day.call_args.args[2] == "tomorrow"
+
+        update = create_mock_callback(user_id=user_id, callback_data="review:add_event")
+        await bot.review_callback_handler(update, context)
+        assert update.callback_query.message.reply_text.call_count >= 2
+        assert database.get_draft(user_id)["stage"] == "date_selection"
+
+        update = create_mock_callback(user_id=user_id, callback_data="review:done")
+        await bot.review_callback_handler(update, context)
+        review = database.get_daily_review(user_id, update.callback_query.message.chat_id, bot.tomorrow_text())
+        assert review["status"] == "reviewed"
+
+        update = create_mock_callback(user_id=user_id, callback_data="review:no_plans")
+        await bot.review_callback_handler(update, context)
+        review = database.get_daily_review(user_id, update.callback_query.message.chat_id, bot.tomorrow_text())
+        assert review["status"] == "no_plans"
+        print("   ✓ Review buttons view tomorrow, start add flow, and save statuses")
+
+    # Test 14: scheduled jobs are registered once at startup
+    print("\n14. Testing scheduled job registration...")
+    mock_app = Mock()
+    mock_app.job_queue = Mock()
+    old_job = Mock()
+    mock_app.job_queue.get_jobs_by_name.side_effect = [[old_job], []]
+    bot.register_scheduled_jobs(mock_app)
+    assert old_job.schedule_removal.called, "Existing named jobs should be removed before re-registering"
+    assert mock_app.job_queue.run_daily.call_count == 2, "Should register 5am and 8pm daily jobs"
+    job_names = [call.kwargs["name"] for call in mock_app.job_queue.run_daily.call_args_list]
+    assert "daily_5am_itinerary" in job_names and "daily_8pm_review" in job_names
+    print("   ✓ Daily jobs are registered once by name at startup")
+
+    # Test 15: event delete asks for confirmation before deleting
+    print("\n15. Testing event delete confirmation...")
+    with patch.object(database, 'DB_PATH', TEST_DB_PATH):
+        user_id = 13582
+        event_data = {
+            "google_event_id": "delete-confirm-event",
+            "title": "Delete Confirm Test",
+            "date": bot.today_text(),
+            "start_time": "09:00",
+            "end_time": "10:00",
+            "location": "",
+            "notes": "",
+        }
+        database.save_draft(user_id, "event_selection", {"events": [event_data]})
+        update = create_mock_callback(user_id=user_id, callback_data="event:delete:0")
+        with patch.object(bot.calendar_service, "delete_event") as delete_mock:
+            await bot.event_callback_handler(update, context)
+        delete_mock.assert_not_called()
+        assert "Delete this event" in str(update.callback_query.edit_message_text.call_args)
+        assert "Confirm delete" in str(update.callback_query.edit_message_text.call_args)
+        assert "Cancel" in str(update.callback_query.edit_message_text.call_args)
+        print("   ✓ Event deletion shows Confirm delete and Cancel buttons first")
+
+    # Test 16: custom date view text input
+    print("\n16. Testing custom date view text input...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 11223
         database.save_draft(user_id, "awaiting_view_date", {})
@@ -753,8 +864,8 @@ async def test_command_handlers():
         assert database.get_draft(user_id)["stage"] == "awaiting_view_date"
         print("   ✓ Custom date view handles valid and invalid dates")
 
-    # Test 13: /add_task text input saves task
-    print("\n13. Testing add task text input...")
+    # Test 17: /add_task text input saves task
+    print("\n17. Testing add task text input...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44556
         task_date = bot.tomorrow_text()
@@ -769,8 +880,8 @@ async def test_command_handlers():
         assert database.get_draft(user_id)["data"]["task_date"] == task_date
         print("   ✓ Text after /add_task saves an important task")
 
-    # Test 14: /edit_task text input updates task and shows the refreshed list
-    print("\n14. Testing edit task text input...")
+    # Test 18: /edit_task text input updates task and shows the refreshed list
+    print("\n18. Testing edit task text input...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44557
         task_id = database.add_important_task(user_id, bot.today_text(), "Old task")
@@ -785,8 +896,8 @@ async def test_command_handlers():
         assert database.get_draft(user_id)["data"]["task_date"] == bot.today_text()
         print("   ✓ Text after /edit_task updates an important task")
 
-    # Test 15: task callbacks auto-show refreshed task lists
-    print("\n15. Testing task callbacks show refreshed lists...")
+    # Test 19: task callbacks auto-show refreshed task lists
+    print("\n19. Testing task callbacks show refreshed lists...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44558
         task_id = database.add_important_task(user_id, bot.today_text(), "Callback task")
@@ -814,8 +925,8 @@ async def test_command_handlers():
         assert "updated task text" in str(update.callback_query.edit_message_text.call_args)
         print("   ✓ Done, delete, and edit callbacks update or prepare the visible task list")
 
-    # Test 16: task refresh re-pins an existing summary after editing it
-    print("\n16. Testing task refresh re-pins existing summary...")
+    # Test 20: task refresh re-pins an existing summary after editing it
+    print("\n20. Testing task refresh re-pins existing summary...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44559
         chat_id = 777
@@ -843,8 +954,8 @@ async def test_command_handlers():
         assert task_context.bot.pin_chat_message.call_args.kwargs["message_id"] == 321
         print("   ✓ Existing task summary is edited and re-pinned")
 
-    # Test 17: manual task refresh unpins old known task summaries
-    print("\n17. Testing manual task refresh unpins old task summaries...")
+    # Test 21: manual task refresh unpins old known task summaries
+    print("\n21. Testing manual task refresh unpins old task summaries...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44560
         chat_id = 777
@@ -868,8 +979,8 @@ async def test_command_handlers():
         assert "Important task summary refreshed" in str(update.message.reply_text.call_args)
         print("   ✓ Manual task refresh unpins old known summaries before pinning today's list")
 
-    # Test 18: opening today's task menu pins the newly printed task message
-    print("\n18. Testing today's task menu pins the newest printed task message...")
+    # Test 22: opening today's task menu pins the newly printed task message
+    print("\n22. Testing today's task menu pins the newest printed task message...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44561
         chat_id = 777
@@ -905,8 +1016,8 @@ async def test_command_handlers():
         assert "Quick guide" not in str(second_reply)
         print("   ✓ Today's task menu unpins old summaries and pins the newest summary-only message")
 
-    # Test 19: future task menus and refreshes do not pin or unpin
-    print("\n19. Testing future task menus and refreshes do not pin...")
+    # Test 23: future task menus and refreshes do not pin or unpin
+    print("\n23. Testing future task menus and refreshes do not pin...")
     with patch.object(database, 'DB_PATH', TEST_DB_PATH):
         user_id = 44562
         chat_id = 777

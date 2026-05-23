@@ -70,6 +70,29 @@ def init_db():
     )
     """
     )
+    c.execute(
+        """
+    CREATE TABLE IF NOT EXISTS bot_users (
+        user_id INTEGER,
+        chat_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, chat_id)
+    )
+    """
+    )
+    c.execute(
+        """
+    CREATE TABLE IF NOT EXISTS daily_reviews (
+        user_id INTEGER,
+        chat_id INTEGER,
+        review_date TEXT,
+        status TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, chat_id, review_date)
+    )
+    """
+    )
     conn.commit()
     conn.close()
 
@@ -402,3 +425,68 @@ def clear_old_task_pins_if_needed(user_id: int, chat_id: int, before_date: str) 
     )
     conn.commit()
     conn.close()
+
+
+def save_bot_user(user_id: int, chat_id: int) -> None:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO bot_users (user_id, chat_id)
+        VALUES (?, ?)
+        ON CONFLICT(user_id, chat_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
+        """,
+        (user_id, chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_bot_users() -> list[dict]:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT user_id, chat_id, created_at, last_seen_at
+        FROM bot_users
+        ORDER BY last_seen_at DESC
+        """
+    )
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_daily_review(user_id: int, chat_id: int, review_date: str, status: str) -> None:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO daily_reviews (user_id, chat_id, review_date, status)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, chat_id, review_date) DO UPDATE SET
+            status = excluded.status,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (user_id, chat_id, review_date, status),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_daily_review(user_id: int, chat_id: int, review_date: str) -> dict | None:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT user_id, chat_id, review_date, status, updated_at
+        FROM daily_reviews
+        WHERE user_id = ? AND chat_id = ? AND review_date = ?
+        """,
+        (user_id, chat_id, review_date),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
